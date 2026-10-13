@@ -1,5 +1,7 @@
 # TaxiMeterCore — Android core prototype
 
+> **Current source status (0.8.3):** The Persian driver Activity is integrated with the Room database and location foreground service. The screen now keeps its attached view hierarchy and reconciles matching views in place, updates only while visible, shows passenger boarding/alighting times, and presents payment methods as prominent buttons. Android 6 is targeted through `minSdk = 23`. The payment options for cash/barcode/e-wallet/citizen card are UI placeholders, and the Bluetooth POS gateway is not configured. This source has **not** been compiled with the Android SDK or installed on a device in this environment; run the repository GitHub Actions workflow before using it.
+
 This repository is an early **core prototype**, not yet a driver-ready taxi-meter application. It establishes the data model and transactional trip lifecycle for a rotating/shared taxi with up to four simultaneous passenger trips.
 
 ## Decisions encoded

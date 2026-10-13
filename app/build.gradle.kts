@@ -12,8 +12,8 @@ android {
         applicationId = "ir.taximeter.core"
         minSdk = 23
         targetSdk = 35
-        versionCode = 3
-        versionName = "0.8.0-android6"
+        versionCode = 6
+        versionName = "0.8.3-inplace-ui"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
     compileOptions {

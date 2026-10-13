@@ -4,6 +4,7 @@ import android.Manifest
 import android.app.AlertDialog
 import android.content.pm.PackageManager
 import android.graphics.Typeface
+import android.graphics.drawable.GradientDrawable
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
@@ -52,15 +53,18 @@ class MainActivity : ComponentActivity() {
     private var actionInProgress = false
     private var selectedTab = TAB_CURRENT
     private val mainHandler = Handler(Looper.getMainLooper())
+    // Poll only while visible. The attached view tree is reconciled in place, not replaced.
+    private var activityVisible = false
     private val refreshRunnable = object : Runnable {
         override fun run() {
-            if (activityVisible && selectedTab == TAB_CURRENT && !actionInProgress) {
-                lifecycleScope.launch { refreshScreen() }
+            if (!activityVisible) return
+            lifecycleScope.launch {
+                refreshScreen()
+                if (activityVisible) mainHandler.postDelayed(this, UI_REFRESH_INTERVAL_MS)
             }
-            if (activityVisible) mainHandler.postDelayed(this, UI_REFRESH_INTERVAL_MS)
         }
     }
-    private var activityVisible = false
+    private var lastRenderedSignature: String? = null
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -83,9 +87,11 @@ class MainActivity : ComponentActivity() {
     override fun onResume() {
         super.onResume()
         activityVisible = true
-        lifecycleScope.launch { refreshScreen() }
         mainHandler.removeCallbacks(refreshRunnable)
-        mainHandler.postDelayed(refreshRunnable, UI_REFRESH_INTERVAL_MS)
+        lifecycleScope.launch {
+            refreshScreen()
+            if (activityVisible) mainHandler.postDelayed(refreshRunnable, UI_REFRESH_INTERVAL_MS)
+        }
     }
 
     override fun onPause() {
@@ -95,7 +101,6 @@ class MainActivity : ComponentActivity() {
     }
 
     private suspend fun refreshScreen() {
-        val previousScrollY = currentScrollView?.scrollY ?: 0
         val dao = db.taxiDao()
         val activeSession = dao.getActiveSession()
         val displaySession = activeSession ?: dao.getLatestSession()
@@ -115,22 +120,35 @@ class MainActivity : ComponentActivity() {
             latestPoint.validity != "VALID" -> "GPS: آخرین نقطه نامعتبر است"
             else -> "GPS: فعال · دقت آخرین نقطه ${latestValidPoint?.accuracyMeters?.let { "%.0f متر".format(Locale.US, it) } ?: "نامشخص"}"
         }
-
-        val scroll = ScrollView(this).apply {
-            layoutDirection = View.LAYOUT_DIRECTION_RTL
-            isFillViewport = true
+        // Skip even the snapshot build when the meaningful display state has not changed.
+        val signature = buildString {
+            append("tab=").append(selectedTab).append(";session=").append(activeSession?.id)
+                .append(";display=").append(displaySession?.id).append(";fare=").append(fare?.version)
+                .append(";gps=").append(latestPoint?.recordedAtMs).append(':').append(latestPoint?.validity)
+                .append(";fresh=").append(gpsFresh)
+            allTrips.sortedBy { it.id }.forEach { trip ->
+                append(';').append(trip.id).append(':').append(trip.status).append(':')
+                    .append(trip.distanceMeters).append(':').append(trip.calculatedFareToman).append(':')
+                    .append(trip.finalFareToman).append(':').append(trip.fareStatus).append(':')
+                    .append(trip.reviewStatus).append(':').append(trip.hasUnresolvedGap)
+            }
         }
-        val root = LinearLayout(this).apply {
+        if (signature == lastRenderedSignature && screen != null) return
+        lastRenderedSignature = signature
+
+        // Build a desired snapshot off-screen, then reconcile it with the attached tree.
+        // Existing TextViews, buttons and containers are retained wherever their position
+        // and type are unchanged, so scroll position and input focus are not reset.
+        val desiredRoot = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             layoutDirection = View.LAYOUT_DIRECTION_RTL
             setPadding(dp(12), dp(10), dp(12), dp(24))
-            setBackgroundColor(0xFFF2F4F7.toInt())
+            setBackgroundColor(0xFFF3F6FB.toInt())
         }
-        scroll.addView(root)
-        screen = root
+        val root = desiredRoot
 
-        root.addView(text("تاکسی‌متر گردشی", 24f, true).apply { setPadding(0, 0, 0, dp(3)) })
-        root.addView(spacer(8))
+        root.addView(text("تاکسی‌متر", 24f, true, 0xFF123B63.toInt()).apply { setPadding(0, 0, 0, dp(3)) })
+        root.addView(spacer(6))
 
         val shiftStatus = when {
             activeSession != null -> "شیفت فعال · شناسه ${activeSession.id}"
@@ -176,13 +194,14 @@ class MainActivity : ComponentActivity() {
             root.addView(text("هر تغییر، نسخه جدیدی از تعرفه می‌سازد و فقط برای سفرهای بعدی استفاده می‌شود.", 13f, false, 0xFF5F6368.toInt()))
             root.addView(actionButton("تعریف / تغییر تعرفه") { showFareConfigDialog(fare) })
             root.addView(spacer(10))
-            root.addView(text("مصرف باتری", 17f, true))
-            root.addView(text("صفحه فقط در حالت نمایش، هر ۵ ثانیه به‌روز می‌شود. ثبت GPS در سرویس جداگانه ادامه دارد؛ خاموش شدن صفحه، ثبت مسیر را متوقف نمی‌کند.", 13f, false))
             root.addView(spacer(10))
-            root.addView(text("وضعیت GPS: ${latestPoint?.let { if (it.validity == "VALID") "آخرین نقطه معتبر" else "آخرین نقطه نامعتبر" } ?: "بدون داده"}", 13f, false))
-            root.addView(text("اگر موقعیت تازه نیست یا GPS قطع شده، کرایه نهایی نباید بدون بررسی مسیر تأیید شود.", 12f, false, 0xFF8A3B30.toInt()))
+            root.addView(card().apply {
+                addView(text("GPS: ${latestPoint?.let { if (it.validity == "VALID") "آخرین نقطه معتبر" else "آخرین نقطه نامعتبر" } ?: "بدون داده"}", 13f, true,
+                    if (gpsFresh) 0xFF287D46.toInt() else 0xFF9A5B00.toInt()))
+                if (!gpsFresh) addView(text("کرایه نهایی را پس از بررسی مسیر تأیید کنید.", 12f, false, 0xFF8A3B30.toInt()))
+            })
         } else {
-            root.addView(text("نمای کابین", 19f, true))
+            root.addView(text("وضعیت کابین", 18f, true, 0xFF123B63.toInt()))
             root.addView(spacer(5))
 
             // Front row: driver and front passenger seat 1.
@@ -192,7 +211,7 @@ class MainActivity : ComponentActivity() {
                 gravity = Gravity.CENTER
             }
             val driverCard = card().apply {
-                setBackgroundColor(0xFFE3EAF4.toInt())
+                background = roundedBackground(0xFFE3EAF4.toInt(), 14)
                 addView(text("راننده", 16f, true, 0xFF214A78.toInt()))
                 addView(text(if (activeSession != null) "شیفت فعال" else "شیفت غیرفعال", 12f, false))
                 addView(text(if (gpsFresh) "GPS تازه" else "GPS بررسی شود", 12f, true, if (gpsFresh) 0xFF287D46.toInt() else 0xFF9A5B00.toInt()))
@@ -249,7 +268,7 @@ class MainActivity : ComponentActivity() {
                     }
                     if (trip.status == "CLOSED" && trip.calculatedFareToman != null && trip.fareStatus == "FINAL") {
                         historyCard.addView(actionButton("اصلاح کرایه با ثبت علت") { showFareAdjustmentDialog(trip) })
-                        historyCard.addView(actionButton("پرداخت / ارسال به پوز بلوتوثی") { showPaymentDialog(trip.finalFareToman ?: trip.calculatedFareToman ?: 0L, trip.id) })
+                        historyCard.addView(actionButton("روش پرداخت") { showPaymentOptionsDialog(trip.finalFareToman ?: trip.calculatedFareToman ?: 0L, trip.id) })
                     }
                     root.addView(historyCard)
                     root.addView(spacer(5))
@@ -257,16 +276,103 @@ class MainActivity : ComponentActivity() {
             }
         }
         root.addView(spacer(10))
+        val scroll = currentScrollView ?: ScrollView(this).apply {
+            layoutDirection = View.LAYOUT_DIRECTION_RTL
+            isFillViewport = true
+        }
+        val attachedRoot = screen
+        if (attachedRoot == null) {
+            screen = desiredRoot
+            scroll.addView(desiredRoot)
+            setContentView(scroll)
+        } else {
+            reconcileViewGroup(attachedRoot, desiredRoot)
+        }
         currentScrollView = scroll
-        setContentView(scroll)
-        scroll.post { scroll.scrollTo(0, previousScrollY) }
+        // ScrollView and attached child instances survive refreshes, preserving scroll and focus.
+    }
+
+    /** Updates an attached view tree in place, replacing only nodes whose type changed. */
+    private fun reconcileViewGroup(target: android.view.ViewGroup, desired: android.view.ViewGroup) {
+        syncViewProperties(target, desired)
+        // Snapshot and detach desired children first; Android views cannot belong to two parents.
+        val wantedChildren = (0 until desired.childCount).map { desired.getChildAt(it) }
+        desired.removeAllViews()
+        var index = 0
+        while (index < wantedChildren.size) {
+            val wanted = wantedChildren[index]
+            if (index >= target.childCount) {
+                target.addView(wanted, copyLayoutParams(wanted.layoutParams))
+            } else {
+                val existing = target.getChildAt(index)
+                if (existing.javaClass != wanted.javaClass) {
+                    target.removeViewAt(index)
+                    target.addView(wanted, index, copyLayoutParams(wanted.layoutParams))
+                } else {
+                    syncViewProperties(existing, wanted)
+                    if (existing is android.view.ViewGroup && wanted is android.view.ViewGroup) {
+                        reconcileViewGroup(existing, wanted)
+                    }
+                }
+            }
+            index++
+        }
+        while (target.childCount > wantedChildren.size) target.removeViewAt(target.childCount - 1)
+    }
+
+    private fun copyLayoutParams(params: android.view.ViewGroup.LayoutParams?): android.view.ViewGroup.LayoutParams? {
+        if (params == null) return null
+        return when (params) {
+            is LinearLayout.LayoutParams -> LinearLayout.LayoutParams(params)
+            else -> android.view.ViewGroup.LayoutParams(params)
+        }
+    }
+
+    private fun syncViewProperties(target: View, desired: View) {
+        target.visibility = desired.visibility
+        target.alpha = desired.alpha
+        target.isEnabled = desired.isEnabled
+        target.layoutDirection = desired.layoutDirection
+        target.background = desired.background?.constantState?.newDrawable()?.mutate() ?: desired.background
+        val wantedParams = desired.layoutParams
+        if (wantedParams != null) {
+            val current = target.layoutParams
+            if (current == null || current.width != wantedParams.width || current.height != wantedParams.height ||
+                (current is LinearLayout.LayoutParams && wantedParams is LinearLayout.LayoutParams &&
+                    (current.weight != wantedParams.weight || current.leftMargin != wantedParams.leftMargin ||
+                        current.topMargin != wantedParams.topMargin || current.rightMargin != wantedParams.rightMargin ||
+                        current.bottomMargin != wantedParams.bottomMargin))) {
+                target.layoutParams = copyLayoutParams(wantedParams)
+            }
+        }
+        if (target is TextView && desired is TextView) {
+            target.text = desired.text
+            target.textSize = desired.textSize
+            target.setTextColor(desired.currentTextColor)
+            target.typeface = desired.typeface
+            target.gravity = desired.gravity
+            target.setPadding(desired.paddingLeft, desired.paddingTop, desired.paddingRight, desired.paddingBottom)
+        }
+        if (target is Button && desired is Button) {
+            target.setAllCaps(desired.isAllCaps)
+            target.minHeight = desired.minimumHeight
+            target.backgroundTintList = desired.backgroundTintList
+            // actionButton stores the latest callback in its tag; the persistent listener
+            // dispatches through that tag, so refreshed data never leaves stale closures.
+            target.tag = desired.tag
+        }
+        if (target is LinearLayout && desired is LinearLayout) {
+            target.orientation = desired.orientation
+            target.gravity = desired.gravity
+            target.setPadding(desired.paddingLeft, desired.paddingTop, desired.paddingRight, desired.paddingBottom)
+        }
     }
 
     private suspend fun createSeatCard(seat: Int, trip: PassengerTripEntity?, shiftActive: Boolean): LinearLayout {
         val seatCard = card().apply { setPadding(dp(8), dp(8), dp(8), dp(8)) }
         seatCard.addView(text("صندلی $seat", 14f, true))
         if (trip == null) {
-            seatCard.setBackgroundColor(0xFFE8F5EC.toInt())
+            seatCard.background = roundedBackground(0xFFE8F5EC.toInt(), 14)
             seatCard.addView(text("آزاد", 13f, true, 0xFF287D46.toInt()))
             seatCard.addView(actionButton("سوار کردن") {
                 val session = currentSessionId
@@ -277,13 +383,13 @@ class MainActivity : ComponentActivity() {
             val distance = dao.getAllocatedDistanceMeters(trip.id)
             val fareConfig = dao.getFareConfig(trip.fareConfigId)
             val needsReview = trip.reviewStatus == "REQUIRED" || trip.hasUnresolvedGap || trip.distanceStatus == "GAP_DETECTED"
-            seatCard.setBackgroundColor(if (needsReview) 0xFFFFF0D8.toInt() else 0xFFE8EEF9.toInt())
-            seatCard.addView(text(if (needsReview) "نیازمند بررسی" else "مسافر سوار است", 12f, true,
+            seatCard.background = roundedBackground(if (needsReview) 0xFFFFF0D8.toInt() else 0xFFE8EEF9.toInt(), 14)
+            seatCard.addView(text(if (needsReview) "بررسی GPS" else "اشغال", 12f, true,
                 if (needsReview) 0xFF9A5B00.toInt() else 0xFF2256A0.toInt()))
+            seatCard.addView(text("سوار: ${formatTime(trip.boardedAtMs)}", 10f, false, 0xFF526171.toInt()))
             seatCard.addView(text("${distance} متر", 16f, true))
             val estimate = fareConfig?.let { estimateFare(distance, it) }
             seatCard.addView(text("برآورد: ${estimate?.let { money(it) } ?: "تعرفه نامشخص"}", 12f, true))
-            seatCard.addView(text(if (needsReview) "مسافت ثبت‌شده؛ مسیر ناقص/نامطمئن" else "تعرفه روی مسافت GPS ثبت‌شده اعمال می‌شود", 10f, false, 0xFF5F6368.toInt()))
             seatCard.addView(actionButton("پیاده‌شدن") { confirmAlightPassenger(trip) }.apply { isEnabled = !actionInProgress })
         }
         return seatCard
@@ -657,7 +763,50 @@ class MainActivity : ComponentActivity() {
             .setTitle("مبلغ قابل دریافت")
             .setMessage("مبلغ کرایه: ${money(amountToman)} تومان\nاین مبلغ آماده پرداخت است. تأیید دریافت وجه فقط پس از پاسخ معتبر پوز ممکن خواهد بود.")
             .setNegativeButton("بستن", null)
-            .setPositiveButton("پرداخت / ارسال به پوز") { _, _ -> showPaymentDialog(amountToman, tripId) }
+            .setPositiveButton("انتخاب روش پرداخت") { _, _ -> showPaymentOptionsDialog(amountToman, tripId) }
+            .show()
+    }
+
+    private fun showPaymentOptionsDialog(amountToman: Long, tripId: String? = null) {
+        if (amountToman <= 0L) {
+            toast("مبلغ پرداخت باید بیشتر از صفر باشد.")
+            return
+        }
+        val options = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            layoutDirection = View.LAYOUT_DIRECTION_RTL
+            setPadding(dp(18), dp(8), dp(18), dp(4))
+        }
+        val dialog = AlertDialog.Builder(this)
+            .setTitle("روش پرداخت · ${money(amountToman)}")
+            .setView(options)
+            .setNegativeButton("بستن", null)
+            .create()
+        val methods = listOf(
+            Triple("💵  پرداخت نقدی", 0xFF27834A.toInt()) { showPaymentMethodPlaceholder("پرداخت نقدی", amountToman) },
+            Triple("▦  پرداخت با بارکد", 0xFF1769AA.toInt()) { showPaymentMethodPlaceholder("پرداخت با بارکد", amountToman) },
+            Triple("▣  پرداخت با پوز", 0xFF5A55A5.toInt()) { showPaymentDialog(amountToman, tripId) },
+            Triple("◉  کیف پول الکترونیکی", 0xFF087E8B.toInt()) { showPaymentMethodPlaceholder("کیف پول الکترونیکی", amountToman) },
+            Triple("▤  کارت شهروندی", 0xFF9A5B00.toInt()) { showPaymentMethodPlaceholder("کارت شهروندی", amountToman) }
+        )
+        methods.forEach { (label, color, action) ->
+            val button = actionButton(label) {
+                dialog.dismiss()
+                action()
+            }
+            button.backgroundTintList = android.content.res.ColorStateList.valueOf(color)
+            options.addView(button, LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT, dp(48)
+            ).apply { bottomMargin = dp(7) })
+        }
+        dialog.show()
+    }
+
+    private fun showPaymentMethodPlaceholder(method: String, amountToman: Long) {
+        AlertDialog.Builder(this)
+            .setTitle(method)
+            .setMessage("مبلغ: ${money(amountToman)}\nاین گزینه در رابط کاربری آماده شده است؛ اتصال و ثبت تراکنش واقعی هنوز پیاده‌سازی نشده است.")
+            .setPositiveButton("متوجه شدم", null)
             .show()
     }
 
@@ -778,16 +927,26 @@ class MainActivity : ComponentActivity() {
     private fun actionButton(label: String, onClick: () -> Unit): Button = Button(this).apply {
         text = label
         setAllCaps(false)
+        textSize = 14f
         layoutDirection = View.LAYOUT_DIRECTION_RTL
-        setOnClickListener { onClick() }
+        setTextColor(0xFFFFFFFF.toInt())
+        backgroundTintList = android.content.res.ColorStateList.valueOf(0xFF1769AA.toInt())
+        minHeight = dp(46)
+        tag = onClick
+        setOnClickListener { (tag as? (() -> Unit))?.invoke() }
     }
 
     private fun card(): LinearLayout = LinearLayout(this).apply {
         orientation = LinearLayout.VERTICAL
         layoutDirection = View.LAYOUT_DIRECTION_RTL
-        setPadding(dp(14), dp(10), dp(14), dp(10))
-        setBackgroundColor(0xFFFFFFFF.toInt())
-        elevation = dp(1).toFloat()
+        setPadding(dp(12), dp(9), dp(12), dp(9))
+        background = roundedBackground(0xFFFFFFFF.toInt(), 16)
+        elevation = dp(2).toFloat()
+    }
+
+    private fun roundedBackground(color: Int, radiusDp: Int): GradientDrawable = GradientDrawable().apply {
+        setColor(color)
+        cornerRadius = dp(radiusDp).toFloat()
     }
 
     private fun text(value: String, sizeSp: Float, bold: Boolean, color: Int = 0xFF202124.toInt()): TextView = TextView(this).apply {
@@ -805,6 +964,9 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun dp(value: Int): Int = (value * resources.displayMetrics.density).toInt()
+
+    private fun formatTime(timestampMs: Long): String =
+        java.text.SimpleDateFormat("HH:mm:ss", Locale("fa", "IR")).format(java.util.Date(timestampMs))
 
     private fun money(value: Long): String {
         val formatted = NumberFormat.getIntegerInstance(Locale("fa", "IR")).format(value)
@@ -830,8 +992,8 @@ class MainActivity : ComponentActivity() {
         private const val GPS_FRESHNESS_MS = 15_000L
         private const val HISTORICAL_ENDPOINT_MAX_AGE_MS = 5 * 60_000L
         private const val HISTORICAL_ENDPOINT_RADIUS_M = 300.0
-        private const val UI_REFRESH_INTERVAL_MS = 3_000L
         private const val TAB_CURRENT = 0
         private const val TAB_MANAGEMENT = 1
+        private const val UI_REFRESH_INTERVAL_MS = 5_000L
     }
 }
